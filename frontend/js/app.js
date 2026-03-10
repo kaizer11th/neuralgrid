@@ -299,13 +299,24 @@ function drawBars(id) {
 // ── D3 Network Graph ───────────────────────────────────────────────────────
 let svg, sim_force, linkSel, nodeSel;
 const SVG_H = 520;
-const svgW  = () => document.getElementById('network-svg')?.clientWidth || 700;
+
+function svgW() {
+  const el = document.getElementById('network-svg');
+  if (!el) return 700;
+  const w = el.getBoundingClientRect().width;
+  return w > 50 ? w : el.parentElement?.getBoundingClientRect().width || 700;
+}
 
 function initGraph() {
   const el = document.getElementById('network-svg');
   if (!el) return;
   el.innerHTML = '';
-  svg = d3.select('#network-svg').attr('viewBox',`0 0 ${svgW()} ${SVG_H}`);
+  const W = svgW();
+  svg = d3.select('#network-svg')
+    .attr('width', '100%')
+    .attr('height', SVG_H)
+    .attr('viewBox', `0 0 ${W} ${SVG_H}`)
+    .attr('preserveAspectRatio', 'xMidYMid meet');
 
   const defs = svg.append('defs');
   [['green','#00f5c4'],['purple','#7c3aed'],['amber','#f59e0b']].forEach(([n,c])=>{
@@ -630,3 +641,18 @@ window.addEventListener('resize', () => {
     sim_force?.force('center', d3.forceCenter(svgW()/2, SVG_H/2)).alpha(.3).restart();
   }
 });
+
+// ── PATCH: fix SVG sizing and delayed init for Render deployment ───────────
+// Remove the old load listener and replace with a patched version
+// that waits for real DOM dimensions before drawing the graph.
+(function() {
+  // Override updateGraph to also fix viewBox before drawing
+  const _origUpdate = updateGraph;
+  window.updateGraph = function() {
+    if (!svg) return;
+    const W = svgW();
+    svg.attr('width','100%').attr('height', SVG_H).attr('viewBox', `0 0 ${W} ${SVG_H}`);
+    sim_force.force('center', d3.forceCenter(W/2, SVG_H/2));
+    _origUpdate();
+  };
+})();
