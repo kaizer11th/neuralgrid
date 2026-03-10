@@ -1,0 +1,301 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>NeuralGrid — Distributed GPU Network Simulator</title>
+  <script src="https://cdnjs.cloudflare.com/ajax/libs/d3/7.8.5/d3.min.js"></script>
+  <link rel="preconnect" href="https://fonts.googleapis.com" />
+  <link href="https://fonts.googleapis.com/css2?family=Space+Mono:wght@400;700&family=Syne:wght@400;700;800&display=swap" rel="stylesheet" />
+
+  <!--
+    ╔══════════════════════════════════════════════════════════════╗
+    ║  BACKEND URL CONFIG                                          ║
+    ║  When running locally:  leave as empty string ""            ║
+    ║  After deploying Render: paste your Render URL below        ║
+    ║  e.g.  "https://neuralgrid.onrender.com"                    ║
+    ╚══════════════════════════════════════════════════════════════╝
+  -->
+  <script>
+    const BACKEND_URL = "";   // ← REPLACE with your Render URL after deploy
+  </script>
+
+  <link rel="stylesheet" href="static/css/style.css" />
+</head>
+<body>
+
+<!-- ── TICKER ──────────────────────────────────────────────────────────────── -->
+<div class="ticker">
+  <div class="ticker-inner" id="ticker-text">
+    <span class="hi">● NEURALGRID ONLINE</span>
+    <span>DISTRIBUTED GPU NETWORK SIMULATOR</span>
+    <span class="med">● FASTAPI + PYTHON BACKEND + WEBSOCKET</span>
+    <span>REAL GPU PRICING: VAST.AI · SALAD.COM · 2025-Q1</span>
+    <span class="hi">● H100 SXM5 80GB — $2.49/HR VAST.AI</span>
+    <span>RTX 4090 — $0.22/HR SALAD.COM</span>
+    <span class="med">● A100 80GB — $1.89/HR VAST.AI</span>
+  </div>
+</div>
+
+<!-- ── HEADER ──────────────────────────────────────────────────────────────── -->
+<header>
+  <div class="logo">
+    <div class="logo-icon">⬡</div>
+    <div>
+      <h1>NeuralGrid</h1>
+      <span>Distributed GPU Network Simulator</span>
+    </div>
+  </div>
+  <div class="header-stats">
+    <div class="stat-pill" id="ws-pill">
+      <div class="dot" id="ws-dot" style="background:var(--danger);box-shadow:0 0 8px var(--danger)"></div>
+      <span id="ws-label">Connecting…</span>
+    </div>
+    <div class="stat-pill"><div class="dot"></div><span id="h-nodes">0 Nodes</span></div>
+    <div class="stat-pill warn"><div class="dot"></div><span id="h-jobs">0 Running</span></div>
+    <div class="stat-pill purple"><div class="dot"></div><span id="h-tflops">0 TFLOPS</span></div>
+    <div class="stat-pill earn"><div class="dot"></div><span id="h-earn">$0.0000</span></div>
+  </div>
+</header>
+
+<!-- ── TABS ────────────────────────────────────────────────────────────────── -->
+<nav class="nav-tabs">
+  <button class="tab active" data-tab="network"  onclick="switchTab(this)">⬡ Network</button>
+  <button class="tab"        data-tab="jobs"     onclick="switchTab(this)">⚡ Job Queue</button>
+  <button class="tab"        data-tab="analytics"onclick="switchTab(this)">📊 Analytics</button>
+  <button class="tab"        data-tab="catalog"  onclick="switchTab(this)">🖥 GPU Catalog</button>
+  <button class="tab"        data-tab="logs"     onclick="switchTab(this)">📋 Event Log</button>
+</nav>
+
+<!-- ── MAIN ────────────────────────────────────────────────────────────────── -->
+<main>
+
+  <!-- NETWORK ---------------------------------------------------------------- -->
+  <div id="view-network" class="view active">
+    <div class="network-layout">
+
+      <!-- Graph panel -->
+      <div class="panel">
+        <div class="panel-header">
+          <h2>Live Network Topology</h2>
+          <div class="legend">
+            <span class="leg-item"><span class="leg-dot" style="border-color:var(--accent)"></span>Provider</span>
+            <span class="leg-item"><span class="leg-dot" style="border-color:var(--accent2)"></span>Client</span>
+            <span class="leg-item"><span class="leg-dot" style="border-color:var(--accent3)"></span>Hub</span>
+          </div>
+        </div>
+        <svg id="network-svg"></svg>
+        <div class="graph-footer">
+          <div class="sim-controls">
+            <button class="btn btn-primary" onclick="ctrlStep()">▶ Step</button>
+            <button class="btn btn-warn" id="auto-btn" onclick="ctrlToggle()">⏩ Start</button>
+            <select class="btn" id="speed-sel" onchange="ctrlSpeed(this.value)">
+              <option value="0.5">0.5×</option>
+              <option value="1" selected>1×</option>
+              <option value="2">2×</option>
+              <option value="5">5×</option>
+              <option value="10">10×</option>
+            </select>
+            <span class="tick-label">Tick <span id="tick-val">0</span></span>
+            <button class="btn btn-danger ml-auto" onclick="ctrlReset()">↺ Reset</button>
+          </div>
+        </div>
+      </div>
+
+      <!-- Sidebar -->
+      <div class="sidebar">
+
+        <!-- Add Provider -->
+        <div class="panel">
+          <div class="panel-header"><h2>+ Add GPU Provider</h2></div>
+          <div class="panel-body">
+            <div class="field"><label>Node Name</label>
+              <input id="p-name" placeholder="GPU_NODE_001" /></div>
+            <div class="row2">
+              <div class="field"><label>GPU Model</label>
+                <select id="p-gpu" onchange="previewGpu(this.value)"></select></div>
+              <div class="field"><label>BW Gbps</label>
+                <input id="p-bw" type="number" value="10" min="1" max="100" /></div>
+            </div>
+            <div id="gpu-preview" class="gpu-preview">Select a GPU to see real specs</div>
+            <div class="field" style="margin-bottom:14px"><label>Region</label>
+              <select id="p-loc">
+                <option>US-East</option><option>US-West</option>
+                <option>EU-West</option><option>EU-Central</option>
+                <option>Asia-Pacific</option><option>South America</option>
+              </select>
+            </div>
+            <button class="btn btn-primary w100" onclick="addNode()">+ Add Provider Node</button>
+          </div>
+        </div>
+
+        <!-- Add Client -->
+        <div class="panel">
+          <div class="panel-header"><h2>+ Add Client</h2></div>
+          <div class="panel-body">
+            <div class="field"><label>Client Name</label>
+              <input id="c-name" placeholder="CLIENT_001" /></div>
+            <div class="row2">
+              <div class="field"><label>Workload</label>
+                <select id="c-wl"></select></div>
+              <div class="field"><label>VRAM GB</label>
+                <input id="c-vram" type="number" value="12" min="1" max="80" /></div>
+            </div>
+            <div class="field" style="margin-bottom:14px"><label>Priority</label>
+              <select id="c-prio">
+                <option value="high">High</option>
+                <option value="normal" selected>Normal</option>
+                <option value="low">Low</option>
+              </select>
+            </div>
+            <button class="btn btn-purple w100" onclick="addClient()">+ Add Client</button>
+          </div>
+        </div>
+
+        <!-- Node list -->
+        <div class="panel">
+          <div class="panel-header">
+            <h2>Active Nodes</h2>
+            <span class="muted" id="node-count">0 total</span>
+          </div>
+          <div class="panel-body p12"><div class="node-list" id="node-list"></div></div>
+        </div>
+
+      </div><!-- /sidebar -->
+    </div>
+  </div><!-- /network -->
+
+  <!-- JOBS ------------------------------------------------------------------- -->
+  <div id="view-jobs" class="view">
+    <div class="two-col">
+
+      <div class="panel">
+        <div class="panel-header"><h2>⚡ Submit Job</h2></div>
+        <div class="panel-body">
+          <div class="field"><label>Job Name</label>
+            <input id="j-name" placeholder="StableDiffusion-XL-Batch" /></div>
+          <div class="row2">
+            <div class="field"><label>Workload Preset</label>
+              <select id="j-preset" onchange="applyPreset(this.value)">
+                <option value="">— Custom —</option>
+              </select>
+            </div>
+            <div class="field"><label>Priority</label>
+              <select id="j-prio">
+                <option value="critical">🔴 Critical</option>
+                <option value="high">🟡 High</option>
+                <option value="normal" selected>🟢 Normal</option>
+                <option value="low">⚪ Low</option>
+              </select>
+            </div>
+          </div>
+          <div class="row2">
+            <div class="field"><label>VRAM Req GB</label>
+              <input id="j-vram" type="number" value="8" min="1" max="80" /></div>
+            <div class="field"><label>TFLOPS Req</label>
+              <input id="j-tflops" type="number" value="20" min="1" max="1000" /></div>
+          </div>
+          <div class="row2" style="margin-bottom:14px">
+            <div class="field"><label>Duration (ticks)</label>
+              <input id="j-dur" type="number" value="5" min="1" max="100" /></div>
+            <div class="field"><label>Assign Client</label>
+              <select id="j-client"><option value="">— None —</option></select></div>
+          </div>
+          <button class="btn btn-primary w100" onclick="submitJob()" style="margin-bottom:8px">⚡ Submit Job</button>
+          <button class="btn btn-warn w100" onclick="submitRandom()">🎲 Submit 5 Random Jobs</button>
+          <div class="divider"></div>
+          <div class="mini-grid">
+            <div class="mini-card"><div class="mini-val accent" id="s-run">0</div><div class="mini-lbl">Running</div></div>
+            <div class="mini-card"><div class="mini-val purple" id="s-que">0</div><div class="mini-lbl">Queued</div></div>
+            <div class="mini-card"><div class="mini-val green" id="s-done">0</div><div class="mini-lbl">Completed</div></div>
+            <div class="mini-card"><div class="mini-val warn" id="s-earn">$0</div><div class="mini-lbl">Earnings</div></div>
+          </div>
+        </div>
+      </div>
+
+      <div class="panel">
+        <div class="panel-header">
+          <h2>Job Queue</h2>
+          <button class="btn btn-danger sm" onclick="clearDone()">Clear Done</button>
+        </div>
+        <div class="panel-body p12"><div class="job-queue" id="job-queue"></div></div>
+      </div>
+
+    </div>
+  </div>
+
+  <!-- ANALYTICS -------------------------------------------------------------- -->
+  <div id="view-analytics" class="view">
+    <div class="metric-row">
+      <div class="metric-card"><div class="metric-lbl">Total Nodes</div>
+        <div class="metric-val accent" id="m-nodes">0</div>
+        <div class="metric-sub" id="m-nodes-sub">0 idle · 0 busy</div></div>
+      <div class="metric-card"><div class="metric-lbl">Network TFLOPS FP32</div>
+        <div class="metric-val purple" id="m-tflops">0</div>
+        <div class="metric-sub" id="m-util-sub">0% utilized</div></div>
+      <div class="metric-card"><div class="metric-lbl">Jobs Completed</div>
+        <div class="metric-val accent" id="m-done">0</div>
+        <div class="metric-sub" id="m-done-sub">—</div></div>
+      <div class="metric-card"><div class="metric-lbl">Total Earnings</div>
+        <div class="metric-val warn" id="m-earn">$0</div>
+        <div class="metric-sub">Salad.com rates</div></div>
+    </div>
+    <div class="charts-grid">
+      <div class="panel"><div class="panel-header"><h2>GPU Utilization %</h2></div>
+        <div class="panel-body"><canvas id="c-util" height="180"></canvas></div></div>
+      <div class="panel"><div class="panel-header"><h2>Job Throughput</h2></div>
+        <div class="panel-body"><canvas id="c-thru" height="180"></canvas></div></div>
+      <div class="panel"><div class="panel-header"><h2>VRAM Per Node</h2></div>
+        <div class="panel-body"><canvas id="c-vram" height="180"></canvas></div></div>
+      <div class="panel"><div class="panel-header"><h2>Active Bandwidth Gbps</h2></div>
+        <div class="panel-body"><canvas id="c-bw" height="180"></canvas></div></div>
+    </div>
+  </div>
+
+  <!-- GPU CATALOG ------------------------------------------------------------ -->
+  <div id="view-catalog" class="view">
+    <div class="panel">
+      <div class="panel-header">
+        <h2>🖥 Real GPU Catalog — Market & Rental Pricing</h2>
+        <span class="muted" style="font-size:10px">Source: Vast.ai · Salad.com · TechPowerUp · 2025-Q1</span>
+      </div>
+      <div class="panel-body" style="padding:0;overflow-x:auto">
+        <table class="gpu-table">
+          <thead><tr>
+            <th>GPU Model</th><th>Tier</th><th>VRAM</th>
+            <th>FP32 T</th><th>FP16 T</th><th>BW GB/s</th><th>TDP W</th>
+            <th>Market Price</th><th>Vast.ai /hr</th><th>Salad /hr</th>
+          </tr></thead>
+          <tbody id="gpu-tbody"></tbody>
+        </table>
+      </div>
+    </div>
+  </div>
+
+  <!-- EVENT LOG -------------------------------------------------------------- -->
+  <div id="view-logs" class="view">
+    <div class="panel">
+      <div class="panel-header">
+        <h2>📋 Real-Time Event Log</h2>
+        <div style="display:flex;gap:8px">
+          <button class="btn btn-warn sm" onclick="exportLog()">⬇ Export</button>
+          <button class="btn btn-danger sm" onclick="clearLog()">✕ Clear</button>
+        </div>
+      </div>
+      <div class="panel-body">
+        <div id="log-out" class="log-out"></div>
+      </div>
+    </div>
+  </div>
+
+</main>
+
+<!-- Tooltip -->
+<div class="tooltip hidden" id="tooltip">
+  <div class="tt-title" id="tt-title"></div>
+  <div id="tt-body"></div>
+</div>
+
+<script src="static/js/app.js"></script>
+</body>
+</html>
