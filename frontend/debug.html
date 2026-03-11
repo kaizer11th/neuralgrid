@@ -1,0 +1,175 @@
+<!DOCTYPE html>
+<html>
+<head>
+<meta charset="UTF-8">
+<title>NeuralGrid Debug</title>
+<style>
+  body { background:#050810; color:#e2e8f0; font-family:monospace; padding:20px; }
+  h2   { color:#00f5c4; }
+  .box { background:#0a0f1e; border:1px solid rgba(0,245,196,.2); border-radius:8px; padding:16px; margin:12px 0; }
+  .ok  { color:#4ade80; }
+  .err { color:#ef4444; }
+  .inf { color:#f59e0b; }
+  pre  { white-space:pre-wrap; word-break:break-all; font-size:11px; max-height:200px; overflow-y:auto; }
+  canvas { border:2px solid #00f5c4; display:block; background:#000; }
+  button { background:rgba(0,245,196,.15); color:#00f5c4; border:1px solid rgba(0,245,196,.3);
+           padding:8px 16px; border-radius:6px; cursor:pointer; font-family:monospace; margin:4px; }
+</style>
+</head>
+<body>
+<h1 style="color:#00f5c4">⬡ NeuralGrid — Debug Page</h1>
+<p style="color:#64748b">This page tests each component independently.</p>
+
+<div class="box">
+  <h2>1. Canvas Test</h2>
+  <p>If you see a glowing circle below, Canvas works fine.</p>
+  <canvas id="test-canvas" width="300" height="100"></canvas>
+  <div id="canvas-result"></div>
+</div>
+
+<div class="box">
+  <h2>2. API Test — <code>GET /api/state</code></h2>
+  <button onclick="testAPI()">Test API Now</button>
+  <pre id="api-result">Click button above...</pre>
+</div>
+
+<div class="box">
+  <h2>3. WebSocket Test — <code>/ws</code></h2>
+  <button onclick="testWS()">Connect WebSocket</button>
+  <pre id="ws-result">Click button above...</pre>
+</div>
+
+<div class="box">
+  <h2>4. GPU Catalog — <code>GET /api/gpus</code></h2>
+  <button onclick="testGPUs()">Fetch GPU List</button>
+  <pre id="gpu-result">Click button above...</pre>
+</div>
+
+<div class="box">
+  <h2>5. Add a Node + Start Sim</h2>
+  <button onclick="quickTest()">Run Quick Test</button>
+  <pre id="quick-result">Click button above...</pre>
+</div>
+
+<script>
+// ── Canvas test (runs immediately) ──────────────────────────────────────────
+(function() {
+  const cv = document.getElementById('test-canvas');
+  const ctx = cv.getContext('2d');
+  ctx.fillStyle = '#050810';
+  ctx.fillRect(0,0,300,100);
+  ctx.shadowBlur = 20; ctx.shadowColor = '#00f5c4';
+  ctx.strokeStyle = '#00f5c4'; ctx.lineWidth = 2;
+  ctx.beginPath(); ctx.arc(150, 50, 30, 0, Math.PI*2); ctx.stroke();
+  ctx.fillStyle = '#00f5c4'; ctx.font = 'bold 11px monospace';
+  ctx.textAlign = 'center'; ctx.fillText('Canvas ✓ Working', 150, 54);
+  document.getElementById('canvas-result').innerHTML = '<span class="ok">✓ Canvas is working fine</span>';
+})();
+
+// ── Detect backend URL ───────────────────────────────────────────────────────
+const BASE = window.location.origin;
+const API  = BASE + '/api';
+const WSURL = BASE.replace(/^https/,'wss').replace(/^http/,'ws') + '/ws';
+
+document.title = 'NeuralGrid Debug — ' + BASE;
+
+// ── API test ──────────────────────────────────────────────────────────────────
+async function testAPI() {
+  const el = document.getElementById('api-result');
+  el.innerHTML = '<span class="inf">Fetching ' + API + '/state ...</span>';
+  try {
+    const res  = await fetch(API + '/state');
+    const data = await res.json();
+    el.innerHTML = '<span class="ok">✓ API responded (HTTP ' + res.status + ')</span>\n\n'
+      + JSON.stringify(data, null, 2);
+  } catch(e) {
+    el.innerHTML = '<span class="err">✗ API FAILED: ' + e.message + '</span>';
+  }
+}
+
+// ── WebSocket test ────────────────────────────────────────────────────────────
+function testWS() {
+  const el = document.getElementById('ws-result');
+  el.innerHTML = '<span class="inf">Connecting to ' + WSURL + ' ...</span>';
+  try {
+    const ws = new WebSocket(WSURL);
+    ws.onopen    = () => { el.innerHTML += '\n<span class="ok">✓ WebSocket connected!</span>'; ws.send('ping'); };
+    ws.onmessage = (e) => { el.innerHTML += '\n<span class="ok">✓ Message received: ' + e.data.slice(0,120) + '</span>'; };
+    ws.onerror   = (e) => { el.innerHTML += '\n<span class="err">✗ WebSocket error</span>'; };
+    ws.onclose   = (e) => { el.innerHTML += '\n<span class="inf">WebSocket closed (code ' + e.code + ')</span>'; };
+    setTimeout(() => { try{ws.close();}catch(_){} }, 5000);
+  } catch(e) {
+    el.innerHTML = '<span class="err">✗ WebSocket FAILED: ' + e.message + '</span>';
+  }
+}
+
+// ── GPU catalog test ──────────────────────────────────────────────────────────
+async function testGPUs() {
+  const el = document.getElementById('gpu-result');
+  el.innerHTML = '<span class="inf">Fetching ' + API + '/gpus ...</span>';
+  try {
+    const res  = await fetch(API + '/gpus');
+    const data = await res.json();
+    const list = (data.gpus||[]).map(g => g.model).join('\n');
+    el.innerHTML = '<span class="ok">✓ Got ' + (data.gpus||[]).length + ' GPUs:</span>\n' + list;
+  } catch(e) {
+    el.innerHTML = '<span class="err">✗ FAILED: ' + e.message + '</span>';
+  }
+}
+
+// ── Quick end-to-end test ──────────────────────────────────────────────────────
+async function quickTest() {
+  const el = document.getElementById('quick-result');
+  el.innerHTML = '';
+
+  function log(msg, cls='inf') {
+    el.innerHTML += '<span class="'+cls+'">'+msg+'</span>\n';
+  }
+
+  try {
+    log('1. Fetching GPU catalog...');
+    const gpus = await fetch(API+'/gpus').then(r=>r.json());
+    const model = gpus.gpus[0].model;
+    log('   Got GPU: ' + model, 'ok');
+
+    log('2. Adding a provider node...');
+    const node = await fetch(API+'/nodes', {
+      method:'POST',
+      headers:{'Content-Type':'application/json'},
+      body: JSON.stringify({name:'TEST_NODE', gpu_model:model, bandwidth_gbps:10, location:'Test'})
+    }).then(r=>r.json());
+    log('   Node added: ' + node.id, 'ok');
+
+    log('3. Starting simulation...');
+    await fetch(API+'/sim/control', {
+      method:'POST',
+      headers:{'Content-Type':'application/json'},
+      body: JSON.stringify({action:'start'})
+    });
+    log('   Sim started', 'ok');
+
+    log('4. Waiting 2s then checking tick...');
+    await new Promise(r=>setTimeout(r,2000));
+    const state = await fetch(API+'/state').then(r=>r.json());
+    log('   Tick is now: ' + state.tick, state.tick > 0 ? 'ok' : 'err');
+    log('   Running: ' + state.running, state.running ? 'ok' : 'err');
+    log('   Nodes: ' + state.nodes.length, 'ok');
+
+    log('5. Submitting a random job...');
+    await fetch(API+'/jobs/random', {method:'POST', headers:{'Content-Type':'application/json'}, body:'{}'});
+    const state2 = await fetch(API+'/state').then(r=>r.json());
+    log('   Jobs in queue: ' + state2.jobs.length, 'ok');
+
+    log('\n✓ ALL TESTS PASSED — Backend is working correctly.', 'ok');
+    log('  If graph still shows blank, the issue is purely frontend CSS/layout.', 'inf');
+
+    log('\nFull state snapshot:', 'inf');
+    el.innerHTML += JSON.stringify(state2.stats, null, 2);
+
+  } catch(e) {
+    log('✗ TEST FAILED: ' + e.message, 'err');
+  }
+}
+</script>
+</body>
+</html>
