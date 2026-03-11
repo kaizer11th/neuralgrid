@@ -1,10 +1,10 @@
 /**
- * NeuralGrid — app.js v4
- * Fixed: D3 graph blank, progress bars frozen, tick counter stuck,
- *        simulation not starting, WS drops on Render free tier.
+ * NeuralGrid — app.js v5
+ * Pure Canvas force-directed graph — no D3, no SVG sizing issues.
+ * Works on every browser, every deployment.
  */
 
-// ── Config ─────────────────────────────────────────────────────────────────
+// ── Config ──────────────────────────────────────────────────────────────────
 const BASE = (typeof BACKEND_URL !== 'undefined' && BACKEND_URL !== '')
   ? BACKEND_URL.replace(/\/$/, '')
   : window.location.origin;
@@ -12,7 +12,7 @@ const BASE = (typeof BACKEND_URL !== 'undefined' && BACKEND_URL !== '')
 const API_BASE = BASE + '/api';
 const WS_URL   = BASE.replace(/^https/, 'wss').replace(/^http/, 'ws') + '/ws';
 
-// ── Global state ────────────────────────────────────────────────────────────
+// ── Global state ─────────────────────────────────────────────────────────────
 let S = {
   nodes:[], clients:[], jobs:[],
   stats:{
@@ -24,24 +24,19 @@ let S = {
   util_history:[], throughput_history:[], bw_history:[],
   recent_events:[]
 };
-
 let gpuCatalog = null;
 let workloads  = [];
 let ws         = null;
-let graphReady = false;
 
-// ── REST ────────────────────────────────────────────────────────────────────
+// ── REST ──────────────────────────────────────────────────────────────────────
 async function api(method, path, body) {
   try {
     const opts = { method, headers: {'Content-Type':'application/json'} };
     if (body !== undefined) opts.body = JSON.stringify(body);
     const res = await fetch(API_BASE + path, opts);
-    if (!res.ok) { console.error('API error', res.status, path); return null; }
+    if (!res.ok) { console.error('API', res.status, path); return null; }
     return await res.json();
-  } catch(e) {
-    console.error('fetch failed:', path, e.message);
-    return null;
-  }
+  } catch(e) { console.error('fetch:', path, e.message); return null; }
 }
 
 async function ctrl(action, value) {
@@ -49,114 +44,90 @@ async function ctrl(action, value) {
   if (snap) apply(snap);
 }
 
-// ── WebSocket ───────────────────────────────────────────────────────────────
+// ── WebSocket ─────────────────────────────────────────────────────────────────
 function connectWS() {
   try { ws = new WebSocket(WS_URL); }
   catch(e) { setTimeout(connectWS, 5000); return; }
-
-  ws.onopen = () => {
-    setDot(true);
-    log_ticker('WS CONNECTED');
-  };
+  ws.onopen    = () => { setDot(true); };
   ws.onmessage = (e) => {
     if (e.data === 'pong') return;
-    try {
-      const msg = JSON.parse(e.data);
-      if (msg.type === 'snapshot') apply(msg.data);
-    } catch(_) {}
+    try { const m = JSON.parse(e.data); if (m.type==='snapshot') apply(m.data); } catch(_){}
   };
   ws.onclose  = () => { setDot(false); setTimeout(connectWS, 5000); };
-  ws.onerror  = () => { try { ws.close(); } catch(_){} };
-
-  // Ping every 10 s to prevent Render from closing idle WS
-  const ping = setInterval(() => {
-    if (ws && ws.readyState === WebSocket.OPEN) ws.send('ping');
-    else clearInterval(ping);
-  }, 10000);
+  ws.onerror  = () => { try{ws.close();}catch(_){} };
+  setInterval(()=>{ if(ws?.readyState===1) ws.send('ping'); }, 10000);
 }
 
-function setDot(online) {
-  const d = $('ws-dot'), l = $('ws-label');
-  if (!d) return;
-  d.style.background = online ? 'var(--accent)' : 'var(--danger)';
-  d.style.boxShadow  = online ? '0 0 8px var(--accent)' : '0 0 8px var(--danger)';
-  if (l) l.textContent = online ? 'Live' : 'Reconnecting…';
+function setDot(on) {
+  const d=$i('ws-dot'), l=$i('ws-label');
+  if(!d) return;
+  d.style.background = on ? 'var(--accent)' : 'var(--danger)';
+  d.style.boxShadow  = on ? '0 0 8px var(--accent)' : '0 0 8px var(--danger)';
+  if(l) l.textContent = on ? 'Live' : 'Reconnecting…';
 }
 
-// ── Polling (primary state source — WS is just bonus speed) ─────────────────
-// Poll every 800 ms so tick counter and progress bars update smoothly
-// even when WS is dead (Render free tier kills idle connections)
+// ── Polling — primary update driver ──────────────────────────────────────────
 setInterval(async () => {
   const snap = await api('GET', '/state');
   if (snap) apply(snap);
 }, 800);
 
-// ── Apply state ─────────────────────────────────────────────────────────────
+// ── Apply state ───────────────────────────────────────────────────────────────
 function apply(data) {
   if (!data) return;
   S = data;
   renderAll();
-  // Retry graph init if it wasn't ready yet
-  if (!graphReady) tryInitGraph();
 }
 
-// ── Render pipeline ──────────────────────────────────────────────────────────
+// ── Render all ────────────────────────────────────────────────────────────────
 function renderAll() {
   renderHeader();
   renderNodeList();
   renderJobQueue();
   renderMetrics();
   renderLog();
-  renderGraph();
-  // Sync tick counter
-  const tel = $('tick-val');
+  graphDraw();   // canvas graph — always works
+  const tel = $i('tick-val');
   if (tel) tel.textContent = S.tick ?? 0;
-  // Sync start/pause button
-  const btn = $('auto-btn');
+  const btn = $i('auto-btn');
   if (btn) {
     btn.textContent = S.running ? '⏸ Pause' : '⏩ Start';
     btn.className   = 'btn ' + (S.running ? 'btn-danger' : 'btn-warn');
   }
 }
 
-// ── Header ───────────────────────────────────────────────────────────────────
+// ── Header ────────────────────────────────────────────────────────────────────
 function renderHeader() {
   const st = S.stats;
-  set('h-nodes',  `${st.total_nodes  ?? 0} Nodes`);
-  set('h-jobs',   `${st.running_jobs ?? 0} Running`);
-  set('h-tflops', `${st.utilized_tflops ?? 0}/${st.total_tflops ?? 0}T`);
-  set('h-earn',   `$${(st.total_earnings ?? 0).toFixed(4)}`);
+  txt('h-nodes',  `${st.total_nodes??0} Nodes`);
+  txt('h-jobs',   `${st.running_jobs??0} Running`);
+  txt('h-tflops', `${st.utilized_tflops??0}/${st.total_tflops??0}T`);
+  txt('h-earn',   `$${(st.total_earnings??0).toFixed(4)}`);
 }
 
 // ── Node list ─────────────────────────────────────────────────────────────────
 function renderNodeList() {
-  const el = $('node-list');
-  if (!el) return;
-  const tot = (S.nodes?.length ?? 0) + (S.clients?.length ?? 0);
-  set('node-count', `${tot} total`);
-
+  const el = $i('node-list'); if (!el) return;
+  txt('node-count', `${(S.nodes?.length??0)+(S.clients?.length??0)} total`);
   let h = '';
-  for (const n of (S.nodes ?? [])) {
-    const col = n.status==='idle' ? 'var(--accent)'
-              : n.status==='busy' ? 'var(--accent3)' : 'var(--muted)';
+  for (const n of (S.nodes??[])) {
+    const c = n.status==='idle'?'var(--accent)':n.status==='busy'?'var(--accent3)':'var(--muted)';
     h += `<div class="node-item">
-      <div class="nd" style="background:${col};box-shadow:0 0 6px ${col}"></div>
+      <div class="nd" style="background:${c};box-shadow:0 0 6px ${c}"></div>
       <div class="ni">
-        <div class="ni-name">${x(n.name)}
-          <span style="color:#4ade80;font-size:10px">$${n.earnings.toFixed(3)}</span>
-        </div>
-        <div class="ni-meta">${x(n.gpu_model.replace('NVIDIA ','').replace('AMD ',''))} · ${n.vram}GB · ${x(n.location)}</div>
+        <div class="ni-name">${esc(n.name)} <span style="color:#4ade80;font-size:10px">$${n.earnings.toFixed(3)}</span></div>
+        <div class="ni-meta">${esc(n.gpu_model.replace('NVIDIA ','').replace('AMD ',''))} · ${n.vram}GB · ${esc(n.location)}</div>
       </div>
       <span class="nbadge s-${n.status}">${n.status}</span>
       <button class="del-btn" onclick="delNode('${n.id}')">✕</button>
     </div>`;
   }
-  for (const c of (S.clients ?? [])) {
+  for (const c of (S.clients??[])) {
     h += `<div class="node-item client-row">
       <div class="nd" style="background:var(--accent2);box-shadow:0 0 6px var(--accent2)"></div>
       <div class="ni">
-        <div class="ni-name">${x(c.name)}</div>
-        <div class="ni-meta">${x(c.workload_type)} · ${c.vram_req}GB · ${c.priority}</div>
+        <div class="ni-name">${esc(c.name)}</div>
+        <div class="ni-meta">${esc(c.workload_type)} · ${c.vram_req}GB · ${c.priority}</div>
       </div>
       <span class="nbadge s-${c.status}">${c.status}</span>
       <button class="del-btn" onclick="delClient('${c.id}')">✕</button>
@@ -166,43 +137,37 @@ function renderNodeList() {
 }
 
 // ── Job queue ─────────────────────────────────────────────────────────────────
-const ICONS = { critical:'🔴', high:'🟡', normal:'🟢', low:'⚪' };
+const PICO = {critical:'🔴',high:'🟡',normal:'🟢',low:'⚪'};
 
 function renderJobQueue() {
   const st = S.stats;
-  set('s-run',  st.running_jobs  ?? 0);
-  set('s-que',  st.queued_jobs   ?? 0);
-  set('s-done', st.completed     ?? 0);
-  set('s-earn', '$' + (st.total_earnings ?? 0).toFixed(4));
-
-  const el = $('job-queue');
-  if (!el) return;
-  const jobs = [...(S.jobs ?? [])].reverse();
+  txt('s-run',  st.running_jobs??0);
+  txt('s-que',  st.queued_jobs??0);
+  txt('s-done', st.completed??0);
+  txt('s-earn', '$'+(st.total_earnings??0).toFixed(4));
+  const el = $i('job-queue'); if (!el) return;
+  const jobs = [...(S.jobs??[])].reverse();
   if (!jobs.length) {
     el.innerHTML = '<div style="color:var(--muted);font-size:11px;text-align:center;padding:30px">No jobs yet.</div>';
     return;
   }
-
   el.innerHTML = jobs.map(j => {
-    const node  = (S.nodes ?? []).find(n => n.id === j.assigned_node);
-    const prog  = Math.max(0, Math.min(100, Number(j.progress) || 0));
-    const badge = j.status==='completed' ? 's-idle'
-                : j.status==='running'   ? 's-busy'
-                : j.status==='queued'    ? 's-waiting' : 's-offline';
+    const node  = (S.nodes??[]).find(n=>n.id===j.assigned_node);
+    const prog  = Math.max(0, Math.min(100, Number(j.progress)||0));
+    const badge = j.status==='completed'?'s-idle':j.status==='running'?'s-busy':j.status==='queued'?'s-waiting':'s-offline';
     return `<div class="job-card ${j.status}">
       <div class="jt">
         <div>
-          <div class="jname">${ICONS[j.priority]??''} ${x(j.name)}</div>
-          <div class="jid">${j.id} · ${x(j.job_type)}</div>
+          <div class="jname">${PICO[j.priority]??''} ${esc(j.name)}</div>
+          <div class="jid">${j.id} · ${esc(j.job_type)}</div>
         </div>
         <span class="nbadge ${badge}">${j.status}</span>
       </div>
       <div class="jmeta">
-        <span>⚡ ${j.tflops_req}T</span>
-        <span>💾 ${j.vram_req}GB</span>
-        <span>🖥 ${node ? x(node.name) : '—'}</span>
-        <span>⏱ ${j.ticks_left ?? j.duration_ticks}t left</span>
-        ${j.estimated_cost ? `<span style="color:#4ade80">💲${j.estimated_cost}</span>` : ''}
+        <span>⚡ ${j.tflops_req}T</span><span>💾 ${j.vram_req}GB</span>
+        <span>🖥 ${node?esc(node.name):'—'}</span>
+        <span>⏱ ${j.ticks_left??j.duration_ticks}t left</span>
+        ${j.estimated_cost?`<span style="color:#4ade80">💲${j.estimated_cost}</span>`:''}
         <span>📊 ${prog}%</span>
       </div>
       <div class="progress-bar">
@@ -215,71 +180,63 @@ function renderJobQueue() {
 // ── Metrics ───────────────────────────────────────────────────────────────────
 function renderMetrics() {
   const st = S.stats;
-  set('m-nodes',     st.total_nodes  ?? 0);
-  set('m-nodes-sub', `${st.idle_nodes??0} idle · ${st.busy_nodes??0} busy`);
-  set('m-tflops',    st.total_tflops ?? 0);
-  set('m-util-sub',  `${st.util_pct  ?? 0}% utilized`);
-  set('m-done',      st.completed    ?? 0);
-  const total = (S.jobs ?? []).length;
-  set('m-done-sub',  total ? `${Math.round((st.completed??0)/total*100)}% success rate` : '—');
-  set('m-earn',      '$' + (st.total_earnings ?? 0).toFixed(4));
+  txt('m-nodes',    st.total_nodes??0);
+  txt('m-nodes-sub',`${st.idle_nodes??0} idle · ${st.busy_nodes??0} busy`);
+  txt('m-tflops',   st.total_tflops??0);
+  txt('m-util-sub', `${st.util_pct??0}% utilized`);
+  txt('m-done',     st.completed??0);
+  const total=(S.jobs??[]).length;
+  txt('m-done-sub', total?`${Math.round((st.completed??0)/total*100)}% success rate`:'—');
+  txt('m-earn',     '$'+(st.total_earnings??0).toFixed(4));
 }
 
 // ── Log ───────────────────────────────────────────────────────────────────────
 function renderLog() {
-  const el = $('log-out');
-  if (!el) return;
-  const ev = S.recent_events ?? [];
-  el.innerHTML = ev.length
-    ? ev.map(e => `<div class="log-line">
-        <span class="log-t">[${e.time}]</span>
-        <span class="log-m ${e.level}">${x(e.msg)}</span>
-      </div>`).join('')
-    : '<div style="color:var(--muted)">No events yet.</div>';
+  const el=$i('log-out');if(!el)return;
+  const ev=S.recent_events??[];
+  el.innerHTML=ev.length
+    ?ev.map(e=>`<div class="log-line"><span class="log-t">[${e.time}]</span><span class="log-m ${e.level}">${esc(e.msg)}</span></div>`).join('')
+    :'<div style="color:var(--muted)">No events yet.</div>';
 }
 
-// ── Charts ─────────────────────────────────────────────────────────────────
+// ── Charts ────────────────────────────────────────────────────────────────────
 function renderCharts() {
-  drawLine('c-util', S.util_history??[],       '#00f5c4', 0, 100);
-  drawLine('c-thru', S.throughput_history??[], '#7c3aed', 0);
+  drawLine('c-util',S.util_history??[],'#00f5c4',0,100);
+  drawLine('c-thru',S.throughput_history??[],'#7c3aed',0);
   drawBars('c-vram');
-  drawLine('c-bw',   S.bw_history??[],         '#f59e0b', 0);
+  drawLine('c-bw',S.bw_history??[],'#f59e0b',0);
 }
 
-function drawLine(id, data, color, minY=0, maxY=null) {
-  const cv = $(id); if (!cv || !cv.getContext) return;
-  const W = cv.offsetWidth || 400, H = 180;
-  cv.width = W; cv.height = H;
-  const ctx = cv.getContext('2d');
-  ctx.clearRect(0,0,W,H);
-  ctx.fillStyle='rgba(0,0,0,.25)'; ctx.fillRect(0,0,W,H);
-  ctx.strokeStyle='rgba(255,255,255,.05)'; ctx.lineWidth=1;
+function drawLine(id,data,color,minY=0,maxY=null){
+  const cv=$i(id);if(!cv||!cv.getContext)return;
+  const W=cv.offsetWidth||400,H=180;cv.width=W;cv.height=H;
+  const ctx=cv.getContext('2d');
+  ctx.fillStyle='rgba(0,0,0,.25)';ctx.fillRect(0,0,W,H);
+  ctx.strokeStyle='rgba(255,255,255,.05)';ctx.lineWidth=1;
   for(let i=0;i<5;i++){const y=H/4*i;ctx.beginPath();ctx.moveTo(0,y);ctx.lineTo(W,y);ctx.stroke();}
-  if(data.length<2) return;
-  const hi=maxY??Math.max(...data,1), lo=minY;
-  const sx=W/(data.length-1), sy=(H-20)/(hi-lo||1);
+  if(data.length<2)return;
+  const hi=maxY??Math.max(...data,1),lo=minY;
+  const sx=W/(data.length-1),sy=(H-20)/(hi-lo||1);
   const g=ctx.createLinearGradient(0,0,0,H);
-  g.addColorStop(0,color+'55'); g.addColorStop(1,color+'00');
+  g.addColorStop(0,color+'55');g.addColorStop(1,color+'00');
   ctx.beginPath();
   data.forEach((v,i)=>{const px=i*sx,py=H-10-(v-lo)*sy;i?ctx.lineTo(px,py):ctx.moveTo(px,py);});
   ctx.lineTo((data.length-1)*sx,H);ctx.lineTo(0,H);ctx.closePath();
   ctx.fillStyle=g;ctx.fill();
-  ctx.beginPath();ctx.strokeStyle=color;ctx.lineWidth=2.5;
-  ctx.shadowBlur=10;ctx.shadowColor=color;
+  ctx.beginPath();ctx.strokeStyle=color;ctx.lineWidth=2.5;ctx.shadowBlur=10;ctx.shadowColor=color;
   data.forEach((v,i)=>{const px=i*sx,py=H-10-(v-lo)*sy;i?ctx.lineTo(px,py):ctx.moveTo(px,py);});
   ctx.stroke();ctx.shadowBlur=0;
-  const lx=(data.length-1)*sx, ly=H-10-(data[data.length-1]-lo)*sy;
+  const lx=(data.length-1)*sx,ly=H-10-(data[data.length-1]-lo)*sy;
   ctx.beginPath();ctx.arc(lx,ly,4,0,Math.PI*2);ctx.fillStyle=color;ctx.fill();
   ctx.fillStyle='rgba(148,163,184,.9)';ctx.font='10px Space Mono,monospace';
   ctx.fillText(String(data[data.length-1]),Math.min(lx+6,W-32),ly+4);
 }
 
-function drawBars(id) {
-  const cv=$(id);if(!cv||!cv.getContext)return;
-  const W=cv.offsetWidth||400,H=180;
-  cv.width=W;cv.height=H;
+function drawBars(id){
+  const cv=$i(id);if(!cv||!cv.getContext)return;
+  const W=cv.offsetWidth||400,H=180;cv.width=W;cv.height=H;
   const ctx=cv.getContext('2d');
-  ctx.clearRect(0,0,W,H);ctx.fillStyle='rgba(0,0,0,.25)';ctx.fillRect(0,0,W,H);
+  ctx.fillStyle='rgba(0,0,0,.25)';ctx.fillRect(0,0,W,H);
   const nodes=(S.nodes??[]).slice(0,8);
   if(!nodes.length){
     ctx.fillStyle='rgba(100,116,139,.6)';ctx.font='11px Space Mono,monospace';
@@ -302,233 +259,385 @@ function drawBars(id) {
   ctx.textAlign='left';
 }
 
-// ── D3 Network graph ──────────────────────────────────────────────────────────
-let svgEl=null, force=null, lSel=null, nSel=null;
-const GH = 500;
+// ════════════════════════════════════════════════════════════════════════════
+//  PURE CANVAS FORCE-DIRECTED GRAPH
+//  No D3, no SVG. Always renders. Physics sim runs in JS, draws on Canvas.
+// ════════════════════════════════════════════════════════════════════════════
+const GRAPH = {
+  nodes: [],   // { id, type, label, sub, x, y, vx, vy, data }
+  links: [],   // { source, target, active, isC }
+  canvas: null,
+  ctx: null,
+  W: 0, H: 520,
+  raf: null,
+  hoverId: null,
+  dragging: null,
+  dragOffX: 0, dragOffY: 0,
 
-function svgWidth() {
-  const el = document.getElementById('network-svg');
-  if (!el) return 700;
-  // Try bounding rect first, fall back to parent
-  let w = el.getBoundingClientRect().width;
-  if (w < 50) w = el.parentElement?.getBoundingClientRect().width ?? 0;
-  if (w < 50) w = window.innerWidth * 0.65;
-  return Math.max(w, 300);
-}
+  init() {
+    this.canvas = document.getElementById('network-canvas');
+    if (!this.canvas) return;
+    this.ctx = this.canvas.getContext('2d');
+    this.resize();
+    window.addEventListener('resize', () => this.resize());
+    this.canvas.addEventListener('mousemove', (e) => this.onMove(e));
+    this.canvas.addEventListener('mousedown', (e) => this.onDown(e));
+    this.canvas.addEventListener('mouseup',   ()  => this.onUp());
+    this.canvas.addEventListener('mouseleave',()  => { this.hoverId=null; this.onUp(); });
+    this.loop();
+  },
 
-function tryInitGraph() {
-  const el = document.getElementById('network-svg');
-  if (!el) return;
-  const w = svgWidth();
-  if (w < 100) {
-    // Not ready yet — retry in 200 ms
-    setTimeout(tryInitGraph, 200);
-    return;
-  }
-  buildGraph(w);
-}
+  resize() {
+    if (!this.canvas) return;
+    const rect = this.canvas.getBoundingClientRect();
+    this.W = rect.width || this.canvas.parentElement?.clientWidth || 700;
+    this.H = 520;
+    this.canvas.width  = this.W;
+    this.canvas.height = this.H;
+  },
 
-function buildGraph(W) {
-  const el = document.getElementById('network-svg');
-  el.innerHTML = '';
+  // Sync nodes/links from app state S
+  sync() {
+    const hub = { id:'hub', type:'hub', label:'HUB', sub:'Coordinator',
+                  x: this.W/2, y: this.H/2, vx:0, vy:0, data:null };
 
-  svgEl = d3.select('#network-svg')
-    .attr('width', '100%')
-    .attr('height', GH)
-    .attr('viewBox', `0 0 ${W} ${GH}`)
-    .attr('preserveAspectRatio', 'xMidYMid meet');
+    const newIds = new Set(['hub',
+      ...(S.nodes??[]).map(n=>n.id),
+      ...(S.clients??[]).map(c=>c.id)
+    ]);
 
-  // Glow filters
-  const defs = svgEl.append('defs');
-  [['gn','#00f5c4'],['gp','#7c3aed'],['ga','#f59e0b']].forEach(([id,c]) => {
-    const f = defs.append('filter').attr('id', id);
-    f.append('feGaussianBlur').attr('stdDeviation','3').attr('result','b');
-    const m = f.append('feMerge');
-    m.append('feMergeNode').attr('in','b');
-    m.append('feMergeNode').attr('in','SourceGraphic');
-  });
+    // Remove nodes that no longer exist
+    this.nodes = this.nodes.filter(n => newIds.has(n.id));
 
-  svgEl.append('g').attr('class','links-g');
-  svgEl.append('g').attr('class','nodes-g');
+    const existById = {};
+    this.nodes.forEach(n => existById[n.id] = n);
 
-  force = d3.forceSimulation()
-    .force('link',   d3.forceLink().id(d=>d.id).distance(150).strength(0.45))
-    .force('charge', d3.forceManyBody().strength(-350))
-    .force('center', d3.forceCenter(W/2, GH/2))
-    .force('coll',   d3.forceCollide(46))
-    .alphaDecay(0.015)
-    .on('tick', gTick);
+    // Hub
+    if (!existById['hub']) {
+      this.nodes.push(hub);
+    } else {
+      // Hub stays fixed at center
+      existById['hub'].x = this.W/2;
+      existById['hub'].y = this.H/2;
+      existById['hub'].vx = 0;
+      existById['hub'].vy = 0;
+    }
 
-  graphReady = true;
-  console.log('D3 graph initialised, W =', W);
-  // Immediately draw with current state
-  renderGraph();
-}
+    // Provider nodes
+    for (const n of (S.nodes??[])) {
+      if (existById[n.id]) {
+        existById[n.id].data = n;
+      } else {
+        // Spawn near center with slight random offset
+        this.nodes.push({
+          id: n.id, type:'provider',
+          label: n.name.slice(0,12),
+          sub:   n.gpu_model.replace('NVIDIA ','').replace('AMD ','').slice(0,14),
+          x: this.W/2 + (Math.random()-0.5)*200,
+          y: this.H/2 + (Math.random()-0.5)*200,
+          vx:0, vy:0, data:n
+        });
+      }
+    }
 
-function gData() {
-  const hub = { id:'hub', type:'hub', label:'HUB', sub:'Coordinator' };
-  const nodes = [
-    hub,
-    ...(S.nodes??[]).map(n => ({
-      id: n.id, type:'provider',
-      label: n.name.slice(0,12),
-      sub:   n.gpu_model.replace('NVIDIA ','').replace('AMD ','').slice(0,14),
-      data:  n,
-    })),
-    ...(S.clients??[]).map(c => ({
-      id: c.id, type:'client',
-      label: c.name.slice(0,12),
-      sub:   c.workload_type,
-      data:  c,
-    })),
-  ];
-  const links = [];
-  (S.nodes??[]).forEach(n =>
-    links.push({ source:'hub', target:n.id, active:n.status==='busy', isC:false })
-  );
-  (S.clients??[]).forEach(c => {
-    links.push({ source:'hub', target:c.id, active:c.status==='active', isC:true });
-    if (c.assigned_node)
-      links.push({ source:c.id, target:c.assigned_node, active:true, isC:true });
-  });
-  return { nodes, links };
-}
+    // Client nodes
+    for (const c of (S.clients??[])) {
+      if (existById[c.id]) {
+        existById[c.id].data = c;
+      } else {
+        this.nodes.push({
+          id: c.id, type:'client',
+          label: c.name.slice(0,12),
+          sub:   c.workload_type,
+          x: this.W/2 + (Math.random()-0.5)*250,
+          y: this.H/2 + (Math.random()-0.5)*250,
+          vx:0, vy:0, data:c
+        });
+      }
+    }
 
-function renderGraph() {
-  if (!svgEl || !force || !graphReady) return;
-
-  const W = svgWidth();
-  svgEl.attr('viewBox', `0 0 ${W} ${GH}`);
-  force.force('center', d3.forceCenter(W/2, GH/2));
-
-  const { nodes, links } = gData();
-
-  // Preserve positions of existing nodes
-  const pos = {};
-  (force.nodes() || []).forEach(n => { pos[n.id] = {x:n.x, y:n.y, vx:n.vx, vy:n.vy}; });
-  nodes.forEach(n => {
-    if (pos[n.id]) Object.assign(n, pos[n.id]);
-    if (n.id === 'hub') { n.fx = W/2; n.fy = GH/2; }
-  });
-
-  // Links
-  lSel = svgEl.select('.links-g').selectAll('line')
-    .data(links, d => {
-      const s = d.source?.id ?? d.source;
-      const t = d.target?.id ?? d.target;
-      return s + '-' + t;
+    // Links
+    this.links = [];
+    (S.nodes??[]).forEach(n => this.links.push({source:'hub',target:n.id,active:n.status==='busy',isC:false}));
+    (S.clients??[]).forEach(c => {
+      this.links.push({source:'hub',target:c.id,active:c.status==='active',isC:true});
+      if (c.assigned_node) this.links.push({source:c.id,target:c.assigned_node,active:true,isC:true});
     });
-  lSel.exit().remove();
-  lSel = lSel.enter().append('line').merge(lSel)
-    .attr('class', d => 'link' + (d.active?' active-job':'') + (d.isC?' client-link':''));
+  },
 
-  // Nodes
-  nSel = svgEl.select('.nodes-g').selectAll('g.ng').data(nodes, d => d.id);
-  nSel.exit().remove();
+  // Force-directed physics tick
+  tick() {
+    const byId = {};
+    this.nodes.forEach(n => byId[n.id] = n);
 
-  const entered = nSel.enter().append('g')
-    .attr('class', d => 'ng node-' + d.type)
-    .call(d3.drag()
-      .on('start', (e,d) => { if(!e.active) force.alphaTarget(.3).restart(); d.fx=d.x;d.fy=d.y; })
-      .on('drag',  (e,d) => { d.fx=e.x; d.fy=e.y; })
-      .on('end',   (e,d) => { if(!e.active) force.alphaTarget(0); if(d.id!=='hub'){d.fx=null;d.fy=null;} }))
-    .on('mouseover', showTip)
-    .on('mousemove',  moveTip)
-    .on('mouseout',   hideTip);
+    const repel  = 6000;
+    const spring = 0.012;
+    const rest   = 140;
+    const damp   = 0.82;
+    const dt     = 1;
 
-  entered.append('circle')
-    .attr('r',      d => d.type==='hub'?30:d.type==='provider'?22:18)
-    .attr('filter', d => d.type==='hub'?'url(#ga)':d.type==='provider'?'url(#gn)':'url(#gp)');
-  entered.append('text').attr('class','node-label').attr('dy','4');
-  entered.append('text').attr('class','node-sublabel').attr('dy','18');
+    // Repulsion between every pair
+    for (let i=0;i<this.nodes.length;i++) {
+      for (let j=i+1;j<this.nodes.length;j++) {
+        const a=this.nodes[i], b=this.nodes[j];
+        let dx=b.x-a.x, dy=b.y-a.y;
+        const d2=dx*dx+dy*dy+1;
+        const d=Math.sqrt(d2);
+        const f=repel/d2;
+        const fx=f*dx/d, fy=f*dy/d;
+        if(a.id!=='hub'){a.vx-=fx*dt;a.vy-=fy*dt;}
+        if(b.id!=='hub'){b.vx+=fx*dt;b.vy+=fy*dt;}
+      }
+    }
 
-  nSel = entered.merge(nSel);
-  nSel.select('.node-label').text(d => d.label);
-  nSel.select('.node-sublabel').text(d => d.type!=='hub' ? d.sub : 'COORDINATOR');
-  nSel.select('circle').attr('stroke', d => {
-    if (d.type==='provider' && d.data)
-      return d.data.status==='busy' ? 'var(--accent3)'
-           : d.data.status==='offline' ? 'var(--muted)' : 'var(--accent)';
-    return d.type==='client' ? 'var(--accent2)' : 'var(--accent3)';
-  });
+    // Spring forces along links
+    for (const lk of this.links) {
+      const a=byId[lk.source], b=byId[lk.target];
+      if(!a||!b) continue;
+      const dx=b.x-a.x, dy=b.y-a.y;
+      const d=Math.sqrt(dx*dx+dy*dy)||1;
+      const f=spring*(d-rest);
+      const fx=f*dx/d, fy=f*dy/d;
+      if(a.id!=='hub'){a.vx+=fx*dt;a.vy+=fy*dt;}
+      if(b.id!=='hub'){b.vx-=fx*dt;b.vy-=fy*dt;}
+    }
 
-  force.nodes(nodes);
-  force.force('link').links(links);
-  force.alpha(0.3).restart();
-}
+    // Centering pull (weak)
+    for (const n of this.nodes) {
+      if(n.id==='hub') continue;
+      n.vx += (this.W/2-n.x)*0.0008;
+      n.vy += (this.H/2-n.y)*0.0008;
+    }
 
-function gTick() {
-  if (!lSel || !nSel) return;
-  lSel.attr('x1',d=>d.source.x).attr('y1',d=>d.source.y)
-      .attr('x2',d=>d.target.x).attr('y2',d=>d.target.y);
-  nSel.attr('transform',d=>`translate(${d.x},${d.y})`);
-}
+    // Integrate + dampen + clamp to canvas
+    for (const n of this.nodes) {
+      if(n.id==='hub'){ n.x=this.W/2; n.y=this.H/2; continue; }
+      if(this.dragging===n.id) continue;
+      n.vx*=damp; n.vy*=damp;
+      n.x+=n.vx*dt; n.y+=n.vy*dt;
+      n.x=Math.max(32,Math.min(this.W-32,n.x));
+      n.y=Math.max(32,Math.min(this.H-32,n.y));
+    }
+  },
 
-// ── Tooltip ───────────────────────────────────────────────────────────────────
-function showTip(event, d) {
-  const tt=$('tooltip'); if(!tt) return;
-  $('tt-title').textContent = d.label || 'Hub';
-  const b=$('tt-body');
-  if (d.type==='hub') {
-    b.innerHTML=row('Nodes',S.nodes?.length??0)+row('Clients',S.clients?.length??0)+row('Tick','#'+S.tick);
-  } else if(d.type==='provider'&&d.data) {
-    const n=d.data;
-    b.innerHTML=row('GPU',n.gpu_model)+row('VRAM',n.vram+'GB')+row('TFLOPS',n.tflops)
-      +row('Status',n.status)+row('Location',n.location)
-      +row('Earnings','$'+n.earnings.toFixed(4))+row('Vast.ai/hr','$'+n.vastai_rate);
-  } else if(d.type==='client'&&d.data) {
-    const c=d.data;
-    b.innerHTML=row('Workload',c.workload_type)+row('VRAM req',c.vram_req+'GB')
-      +row('Priority',c.priority)+row('Status',c.status)+row('Jobs',c.jobs_submitted);
+  draw() {
+    const ctx = this.ctx;
+    const W=this.W, H=this.H;
+    ctx.clearRect(0,0,W,H);
+
+    // Background
+    ctx.fillStyle='rgba(5,8,16,0.92)';
+    ctx.fillRect(0,0,W,H);
+
+    // Grid
+    ctx.strokeStyle='rgba(0,245,196,0.03)';ctx.lineWidth=1;
+    for(let x=0;x<W;x+=40){ctx.beginPath();ctx.moveTo(x,0);ctx.lineTo(x,H);ctx.stroke();}
+    for(let y=0;y<H;y+=40){ctx.beginPath();ctx.moveTo(0,y);ctx.lineTo(W,y);ctx.stroke();}
+
+    if (this.nodes.length === 0) {
+      ctx.fillStyle='rgba(100,116,139,0.5)';
+      ctx.font='13px Space Mono,monospace';
+      ctx.textAlign='center';
+      ctx.fillText('Add GPU provider nodes to see the network', W/2, H/2-12);
+      ctx.font='11px Space Mono,monospace';
+      ctx.fillText('Use the "+ Add GPU Provider" panel on the right →', W/2, H/2+12);
+      ctx.textAlign='left';
+      return;
+    }
+
+    const byId = {};
+    this.nodes.forEach(n => byId[n.id] = n);
+
+    // Draw links
+    for (const lk of this.links) {
+      const a=byId[lk.source], b=byId[lk.target];
+      if(!a||!b) continue;
+      ctx.save();
+      if (lk.active) {
+        const col = lk.isC ? '#7c3aed' : '#00f5c4';
+        ctx.strokeStyle = col;
+        ctx.lineWidth   = 2;
+        ctx.shadowBlur  = 8;
+        ctx.shadowColor = col;
+        // Animated dashes
+        ctx.setLineDash([8,5]);
+        ctx.lineDashOffset = -(Date.now()/40 % 26);
+      } else {
+        ctx.strokeStyle = lk.isC ? 'rgba(124,58,237,0.2)' : 'rgba(0,245,196,0.12)';
+        ctx.lineWidth   = 1.5;
+        ctx.setLineDash([]);
+      }
+      ctx.beginPath();ctx.moveTo(a.x,a.y);ctx.lineTo(b.x,b.y);ctx.stroke();
+      ctx.restore();
+    }
+
+    // Draw nodes
+    for (const n of this.nodes) {
+      const isHover = this.hoverId===n.id;
+      let col, r;
+
+      if (n.type==='hub') {
+        col='#f59e0b'; r=28;
+      } else if (n.type==='provider') {
+        const st=n.data?.status;
+        col = st==='busy'?'#f59e0b':st==='offline'?'#64748b':'#00f5c4';
+        r=22;
+      } else {
+        col='#7c3aed'; r=18;
+      }
+
+      if(isHover) r+=4;
+
+      // Glow
+      ctx.save();
+      ctx.shadowBlur  = isHover ? 20 : 12;
+      ctx.shadowColor = col;
+
+      // Circle fill
+      const grad=ctx.createRadialGradient(n.x,n.y,0,n.x,n.y,r);
+      grad.addColorStop(0, col+'33');
+      grad.addColorStop(1, col+'08');
+      ctx.fillStyle=grad;
+      ctx.beginPath();ctx.arc(n.x,n.y,r,0,Math.PI*2);ctx.fill();
+
+      // Circle stroke
+      ctx.strokeStyle=col;
+      ctx.lineWidth=isHover?2.5:2;
+      ctx.beginPath();ctx.arc(n.x,n.y,r,0,Math.PI*2);ctx.stroke();
+      ctx.restore();
+
+      // Label
+      ctx.fillStyle='#e2e8f0';
+      ctx.font='bold 10px Space Mono,monospace';
+      ctx.textAlign='center';
+      ctx.fillText(n.label, n.x, n.y+4);
+
+      // Sub-label
+      ctx.fillStyle='rgba(100,116,139,0.9)';
+      ctx.font='8px Space Mono,monospace';
+      ctx.fillText(n.sub||'', n.x, n.y+16);
+      ctx.textAlign='left';
+
+      // Status dot for provider nodes
+      if (n.type==='provider' && n.data) {
+        const st=n.data.status;
+        const dc=st==='busy'?'#f59e0b':st==='offline'?'#64748b':'#4ade80';
+        ctx.save();ctx.shadowBlur=6;ctx.shadowColor=dc;
+        ctx.fillStyle=dc;ctx.beginPath();ctx.arc(n.x+r-4,n.y-r+4,5,0,Math.PI*2);ctx.fill();
+        ctx.restore();
+      }
+    }
+
+    // Tooltip
+    if (this.hoverId) {
+      const n=byId[this.hoverId];
+      if(n) this.drawTooltip(ctx,n);
+    }
+
+    ctx.textAlign='left';
+  },
+
+  drawTooltip(ctx, n) {
+    const lines=[];
+    if(n.type==='hub') {
+      lines.push(['Nodes', S.nodes?.length??0],['Clients',S.clients?.length??0],['Tick','#'+S.tick]);
+    } else if(n.type==='provider'&&n.data) {
+      const d=n.data;
+      lines.push(['GPU',d.gpu_model],['VRAM',d.vram+'GB'],['TFLOPS',d.tflops],
+        ['Status',d.status],['Location',d.location],['Earnings','$'+d.earnings.toFixed(4)],
+        ['Vast.ai/hr','$'+d.vastai_rate]);
+    } else if(n.type==='client'&&n.data) {
+      const d=n.data;
+      lines.push(['Workload',d.workload_type],['VRAM req',d.vram_req+'GB'],
+        ['Priority',d.priority],['Status',d.status],['Jobs',d.jobs_submitted]);
+    }
+    const pad=10, lh=18, tw=190;
+    const th=pad*2+lh*lines.length+20;
+    let tx=n.x+32, ty=n.y-th/2;
+    if(tx+tw>this.W-10) tx=n.x-tw-32;
+    ty=Math.max(10,Math.min(this.H-th-10,ty));
+
+    ctx.save();
+    ctx.fillStyle='rgba(10,15,30,0.95)';
+    ctx.strokeStyle='rgba(0,245,196,0.2)';ctx.lineWidth=1;
+    ctx.beginPath();ctx.roundRect(tx,ty,tw,th,8);ctx.fill();ctx.stroke();
+
+    ctx.fillStyle='#00f5c4';ctx.font='bold 11px Space Mono,monospace';
+    ctx.fillText(n.label||'Hub',tx+pad,ty+pad+12);
+
+    lines.forEach(([k,v],i)=>{
+      const y=ty+pad+28+i*lh;
+      ctx.fillStyle='rgba(100,116,139,0.9)';ctx.font='10px Space Mono,monospace';
+      ctx.fillText(k,tx+pad,y);
+      ctx.fillStyle='#e2e8f0';
+      ctx.fillText(String(v),tx+pad+88,y);
+    });
+    ctx.restore();
+  },
+
+  getNodeAt(mx,my) {
+    for(let i=this.nodes.length-1;i>=0;i--){
+      const n=this.nodes[i];
+      const r=n.type==='hub'?30:n.type==='provider'?22:18;
+      const dx=n.x-mx,dy=n.y-my;
+      if(dx*dx+dy*dy<=r*r) return n.id;
+    }
+    return null;
+  },
+
+  onMove(e) {
+    const r=this.canvas.getBoundingClientRect();
+    const mx=e.clientX-r.left, my=e.clientY-r.top;
+    this.hoverId=this.getNodeAt(mx,my);
+    this.canvas.style.cursor=this.hoverId?'pointer':'crosshair';
+    if(this.dragging) {
+      const n=this.nodes.find(n=>n.id===this.dragging);
+      if(n){n.x=mx-this.dragOffX;n.y=my-this.dragOffY;}
+    }
+  },
+
+  onDown(e) {
+    const r=this.canvas.getBoundingClientRect();
+    const mx=e.clientX-r.left, my=e.clientY-r.top;
+    const id=this.getNodeAt(mx,my);
+    if(id&&id!=='hub'){
+      const n=this.nodes.find(n=>n.id===id);
+      if(n){this.dragging=id;this.dragOffX=mx-n.x;this.dragOffY=my-n.y;}
+    }
+  },
+
+  onUp() { this.dragging=null; },
+
+  loop() {
+    this.sync();
+    this.tick();
+    this.draw();
+    requestAnimationFrame(()=>this.loop());
   }
-  tt.classList.remove('hidden');
-  moveTip(event);
-}
-function row(k,v){return`<div class="tt-row"><span>${k}</span><span>${v}</span></div>`;}
-function moveTip(e){
-  const tt=$('tooltip');if(!tt)return;
-  let tx=e.clientX+14,ty=e.clientY-10;
-  if(tx+200>window.innerWidth)tx=e.clientX-215;
-  tt.style.left=tx+'px';tt.style.top=ty+'px';
-}
-function hideTip(){$('tooltip')?.classList.add('hidden');}
+};
 
-// ── Ticker ────────────────────────────────────────────────────────────────────
-function log_ticker(msg,cls=''){
-  const el=$('ticker-text');if(!el)return;
-  const sp=document.createElement('span');
-  if(cls)sp.className=cls;
-  sp.textContent='● '+msg;
-  el.prepend(sp);
-  while(el.children.length>14)el.lastElementChild.remove();
-}
-
-// ── Tab switching ─────────────────────────────────────────────────────────────
+// ── Tabs ──────────────────────────────────────────────────────────────────────
 function switchTab(btn){
   document.querySelectorAll('.view').forEach(v=>v.classList.remove('active'));
   document.querySelectorAll('.tab').forEach(t=>t.classList.remove('active'));
-  const name=btn.dataset.tab;
-  document.getElementById('view-'+name)?.classList.add('active');
+  document.getElementById('view-'+btn.dataset.tab)?.classList.add('active');
   btn.classList.add('active');
-  if(name==='analytics')setTimeout(renderCharts,60);
+  if(btn.dataset.tab==='analytics')setTimeout(renderCharts,60);
 }
 
 // ── GPU catalog ───────────────────────────────────────────────────────────────
-async function loadCatalog() {
-  const data = await api('GET','/gpus');
-  if (!data) { console.error('Could not load GPU catalog'); return; }
-  gpuCatalog = data;
-  workloads  = data.workloads || [];
-
-  const gpuSel = $('p-gpu');
-  if (gpuSel) {
-    gpuSel.innerHTML = data.gpus.map(g=>`<option value="${g.model}">${g.model}</option>`).join('');
+async function loadCatalog(){
+  const data=await api('GET','/gpus');if(!data)return;
+  gpuCatalog=data;workloads=data.workloads||[];
+  const gpuSel=$i('p-gpu');
+  if(gpuSel){
+    gpuSel.innerHTML=data.gpus.map(g=>`<option value="${g.model}">${g.model}</option>`).join('');
     previewGpu(data.gpus[0]?.model);
   }
-  const wlHtml = workloads.map(w=>`<option value="${w.type}">${w.icon||''} ${w.name}</option>`).join('');
-  const cwl=$('c-wl'); if(cwl) cwl.innerHTML=wlHtml;
-  const pre=$('j-preset');
-  if(pre) pre.innerHTML='<option value="">— Custom —</option>'
+  const wlHtml=workloads.map(w=>`<option value="${w.type}">${w.icon||''} ${w.name}</option>`).join('');
+  const cwl=$i('c-wl');if(cwl)cwl.innerHTML=wlHtml;
+  const pre=$i('j-preset');
+  if(pre)pre.innerHTML='<option value="">— Custom —</option>'
     +workloads.map(w=>`<option value="${w.name}">${w.icon||''} ${w.name}</option>`).join('');
   renderGpuTable(data.gpus);
 }
@@ -536,7 +645,7 @@ async function loadCatalog() {
 function previewGpu(model){
   if(!gpuCatalog)return;
   const g=gpuCatalog.gpus.find(g=>g.model===model);if(!g)return;
-  const el=$('gpu-preview');if(!el)return;
+  const el=$i('gpu-preview');if(!el)return;
   el.innerHTML=`<div class="gp-grid">
     <span class="gp-k">VRAM</span><span class="gp-v" style="color:var(--accent)">${g.vram_gb}GB ${g.vram_type}</span>
     <span class="gp-k">FP32 T</span><span class="gp-v" style="color:var(--accent)">${g.tflops_fp32}</span>
@@ -550,15 +659,13 @@ function previewGpu(model){
 }
 
 function renderGpuTable(gpus){
-  const el=$('gpu-tbody');if(!el)return;
+  const el=$i('gpu-tbody');if(!el)return;
   el.innerHTML=gpus.map(g=>`<tr>
     <td><strong>${g.model}</strong><br><span style="color:var(--muted);font-size:10px">${g.architecture} · ${g.release_year}</span></td>
     <td><span class="tier ${g.tier}">${g.tier}</span></td>
     <td style="color:var(--accent)">${g.vram_gb}GB<br><span style="color:var(--muted);font-size:10px">${g.vram_type}</span></td>
-    <td style="color:var(--accent)">${g.tflops_fp32}</td>
-    <td>${g.tflops_fp16}</td>
-    <td>${g.memory_bandwidth_gbps}</td>
-    <td style="color:var(--accent3)">${g.tdp_watts}W</td>
+    <td style="color:var(--accent)">${g.tflops_fp32}</td><td>${g.tflops_fp16}</td>
+    <td>${g.memory_bandwidth_gbps}</td><td style="color:var(--accent3)">${g.tdp_watts}W</td>
     <td>$${g.market_price_usd.toLocaleString()}</td>
     <td style="color:#4ade80">$${g.vastai_rate_per_hour}/hr</td>
     <td style="color:#4ade80">$${g.salad_rate_per_hour}/hr</td>
@@ -573,14 +680,13 @@ function applyPreset(name){
 }
 
 function refreshClientSel(){
-  const sel=$('j-client');if(!sel)return;
+  const sel=$i('j-client');if(!sel)return;
   sel.innerHTML='<option value="">— None —</option>'
     +(S.clients??[]).map(c=>`<option value="${c.id}">${c.name}</option>`).join('');
 }
 
 // ── Actions ───────────────────────────────────────────────────────────────────
-let pN=1, cN=1;
-
+let pN=1,cN=1;
 async function addNode(){
   const model=get('p-gpu');if(!model)return;
   const name=get('p-name').trim()||`GPU_NODE_${String(pN).padStart(3,'0')}`;
@@ -604,15 +710,14 @@ async function submitRandom(){ await api('POST','/jobs/random',{}); }
 async function clearDone()   { await api('DELETE','/jobs/completed'); }
 async function delNode(id)   { await api('DELETE','/nodes/'+id); }
 async function delClient(id) { await api('DELETE','/clients/'+id); }
-
 function ctrlStep()  { ctrl('step'); }
 function ctrlToggle(){ ctrl(S.running?'stop':'start'); }
 function ctrlSpeed(v){ ctrl('speed',parseFloat(v)); }
 function ctrlReset(){
-  if(!confirm('Reset entire network? All nodes, clients and jobs will be cleared.'))return;
+  if(!confirm('Reset entire network?'))return;
   ctrl('reset');
 }
-function clearLog(){ const el=$('log-out');if(el)el.innerHTML=''; }
+function clearLog(){ const el=$i('log-out');if(el)el.innerHTML=''; }
 function exportLog(){
   const txt=(S.recent_events??[]).map(e=>`[${e.time}] [${e.level}] ${e.msg}`).join('\n');
   const a=document.createElement('a');
@@ -621,30 +726,17 @@ function exportLog(){
 }
 
 // ── Helpers ───────────────────────────────────────────────────────────────────
-function $(id)     { return document.getElementById(id); }
-function set(id,v) { const e=$(id);if(e)e.textContent=v; }
-function get(id)   { const e=$(id);return e?e.value:''; }
-function val(id,v) { const e=$(id);if(e)e.value=v; }
-function x(s)      { return String(s??'').replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;'); }
+function $i(id)    { return document.getElementById(id); }
+function txt(id,v) { const e=$i(id);if(e)e.textContent=v; }
+function get(id)   { const e=$i(id);return e?e.value:''; }
+function val(id,v) { const e=$i(id);if(e)e.value=v; }
+function esc(s)    { return String(s??'').replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;'); }
+function graphDraw(){} // stub — actual draw is in GRAPH.loop's rAF
 
 // ── Boot ──────────────────────────────────────────────────────────────────────
 window.addEventListener('load', () => {
-  // Load GPU catalog from backend
+  GRAPH.init();
   loadCatalog();
-
-  // Connect WebSocket
   connectWS();
-
-  // Init graph — try immediately, then retry every 300ms until SVG has width
-  setTimeout(tryInitGraph, 100);
-
-  // Keep client dropdown in sync
   setInterval(refreshClientSel, 2000);
-});
-
-window.addEventListener('resize', () => {
-  if (!svgEl || !force) return;
-  const W = svgWidth();
-  svgEl.attr('viewBox',`0 0 ${W} ${GH}`);
-  force.force('center', d3.forceCenter(W/2, GH/2)).alpha(0.2).restart();
 });

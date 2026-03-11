@@ -159,7 +159,7 @@ main {
 .network-layout { display:grid; grid-template-columns:1fr 340px; gap:20px; align-items:start; }
 .sidebar { display:flex; flex-direction:column; gap:14px; }
 
-#network-svg { width:100%; height:520px; min-height:520px; display:block; overflow:visible; }
+#network-canvas { width:100%; height:520px; min-height:520px; display:block; cursor:crosshair; }
 
 .graph-footer { padding:10px 18px; border-top:1px solid var(--border); }
 .sim-controls { display:flex; gap:8px; align-items:center; flex-wrap:wrap; }
