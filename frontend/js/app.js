@@ -86,7 +86,6 @@ function renderAll() {
   renderJobQueue();
   renderMetrics();
   renderLog();
-  graphDraw();   // canvas graph — always works
   const tel = $i('tick-val');
   if (tel) tel.textContent = S.tick ?? 0;
   const btn = $i('auto-btn');
@@ -209,7 +208,8 @@ function renderCharts() {
 
 function drawLine(id,data,color,minY=0,maxY=null){
   const cv=$i(id);if(!cv||!cv.getContext)return;
-  const W=cv.offsetWidth||400,H=180;cv.width=W;cv.height=H;
+  const W=cv.offsetWidth||0;if(W<10)return;  // skip if hidden
+  const H=180;cv.width=W;cv.height=H;
   const ctx=cv.getContext('2d');
   ctx.fillStyle='rgba(0,0,0,.25)';ctx.fillRect(0,0,W,H);
   ctx.strokeStyle='rgba(255,255,255,.05)';ctx.lineWidth=1;
@@ -234,7 +234,8 @@ function drawLine(id,data,color,minY=0,maxY=null){
 
 function drawBars(id){
   const cv=$i(id);if(!cv||!cv.getContext)return;
-  const W=cv.offsetWidth||400,H=180;cv.width=W;cv.height=H;
+  const W=cv.offsetWidth||0;if(W<10)return;  // skip if hidden
+  const H=180;cv.width=W;cv.height=H;
   const ctx=cv.getContext('2d');
   ctx.fillStyle='rgba(0,0,0,.25)';ctx.fillRect(0,0,W,H);
   const nodes=(S.nodes??[]).slice(0,8);
